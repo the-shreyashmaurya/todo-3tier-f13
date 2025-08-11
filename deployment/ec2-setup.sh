@@ -14,20 +14,27 @@ sudo apt install -y python3 python3-pip python3-venv
 # Install MySQL client (for database connectivity)
 sudo apt install -y mysql-client
 
-# Create application directory
-sudo mkdir -p /opt/todo-backend
-sudo chown ubuntu:ubuntu /opt/todo-backend
+
+# Create application directory and backend subdirectory
+sudo mkdir -p /opt/todo-backend/backend
+sudo chown -R ubuntu:ubuntu /opt/todo-backend
 cd /opt/todo-backend
+
 
 # Create virtual environment
 python3 -m venv venv
 . venv/bin/activate  # <-- POSIX-compatible way to activate
 
+
 # Install Python dependencies inside venv
 pip install --upgrade pip
-pip install flask flask-cors flask-sqlalchemy pymysql python-dotenv gunicorn
+pip install -r backend/requirements.txt
 
-# Create systemd service file
+
+# Copy backend code into backend subdirectory
+cp -r ~/backend/* /opt/todo-backend/backend/
+
+# Create systemd service file with correct WorkingDirectory
 sudo tee /etc/systemd/system/todo-backend.service > /dev/null <<EOF
 [Unit]
 Description=Todo Backend Flask App
@@ -35,7 +42,7 @@ After=network.target
 
 [Service]
 User=ubuntu
-WorkingDirectory=/opt/todo-backend
+WorkingDirectory=/opt/todo-backend/backend
 Environment="PATH=/opt/todo-backend/venv/bin"
 ExecStart=/opt/todo-backend/venv/bin/gunicorn --workers 3 --bind 0.0.0.0:5000 app:app
 Restart=always
