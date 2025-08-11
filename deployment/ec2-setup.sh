@@ -21,9 +21,10 @@ cd /opt/todo-backend
 
 # Create virtual environment
 python3 -m venv venv
-source venv/bin/activate
+. venv/bin/activate  # <-- POSIX-compatible way to activate
 
-# Install Python dependencies
+# Install Python dependencies inside venv
+pip install --upgrade pip
 pip install flask flask-cors flask-sqlalchemy pymysql python-dotenv gunicorn
 
 # Create systemd service file
