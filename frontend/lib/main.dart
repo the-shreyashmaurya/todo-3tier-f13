@@ -19,11 +19,11 @@ class TodoApp extends StatelessWidget {
             create: (_) => TodoProvider(
                 apiService: ApiService(
                     baseUrl:
-                        'http://todo3tier-default-alb-985009105.ap-south-1.elb.amazonaws.com/api'))),
+                        'http://todo3tier-default-alb-1320225941.ap-south-1.elb.amazonaws.com/api'))),
         Provider<ApiService>(
           create: (_) => ApiService(
             baseUrl:
-                'http://todo3tier-default-alb-985009105.ap-south-1.elb.amazonaws.com/api',
+                'http://todo3tier-default-alb-1320225941.ap-south-1.elb.amazonaws.com/api',
           ),
         ),
       ],
