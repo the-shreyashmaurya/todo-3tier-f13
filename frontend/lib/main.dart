@@ -15,10 +15,15 @@ class TodoApp extends StatelessWidget {
   Widget build(BuildContext context) {
     return MultiProvider(
       providers: [
-        ChangeNotifierProvider(create: (_) => TodoProvider()),
+        ChangeNotifierProvider(
+            create: (_) => TodoProvider(
+                apiService: ApiService(
+                    baseUrl:
+                        'http://todo3tier-default-alb-985009105.ap-south-1.elb.amazonaws.com/api'))),
         Provider<ApiService>(
           create: (_) => ApiService(
-            baseUrl: 'http://localhost:5000/api', // Change for production
+            baseUrl:
+                'http://todo3tier-default-alb-985009105.ap-south-1.elb.amazonaws.com/api',
           ),
         ),
       ],
@@ -60,4 +65,4 @@ class TodoApp extends StatelessWidget {
       ),
     );
   }
-} 
+}

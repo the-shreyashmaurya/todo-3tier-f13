@@ -32,7 +32,7 @@ pip install -r backend/requirements.txt
 
 
 # Copy backend code into backend subdirectory
-cp -r ~/backend/* /opt/todo-backend/backend/
+cp -r ./backend/* /opt/todo-backend/backend/
 
 # Create systemd service file with correct WorkingDirectory
 sudo tee /etc/systemd/system/todo-backend.service > /dev/null <<EOF

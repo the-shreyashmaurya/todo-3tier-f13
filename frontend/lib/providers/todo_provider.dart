@@ -8,22 +8,25 @@ class TodoProvider with ChangeNotifier {
   bool _isLoading = false;
   String? _error;
 
-  TodoProvider({ApiService? apiService}) 
-      : _apiService = apiService ?? ApiService(baseUrl: 'http://localhost:5000/api');
+  TodoProvider({ApiService? apiService})
+      : _apiService =
+            apiService ?? ApiService(baseUrl: 'http://13.234.213.233:5000/api');
 
   // Getters
   List<Todo> get todos => _todos;
   bool get isLoading => _isLoading;
   String? get error => _error;
-  
-  List<Todo> get completedTodos => _todos.where((todo) => todo.completed).toList();
-  List<Todo> get pendingTodos => _todos.where((todo) => !todo.completed).toList();
+
+  List<Todo> get completedTodos =>
+      _todos.where((todo) => todo.completed).toList();
+  List<Todo> get pendingTodos =>
+      _todos.where((todo) => !todo.completed).toList();
 
   // Load all todos
   Future<void> loadTodos() async {
     _setLoading(true);
     _clearError();
-    
+
     try {
       _todos = await _apiService.getTodos();
       notifyListeners();
@@ -38,7 +41,7 @@ class TodoProvider with ChangeNotifier {
   Future<void> createTodo(String title, String description) async {
     _setLoading(true);
     _clearError();
-    
+
     try {
       final newTodo = await _apiService.createTodo(title, description);
       _todos.add(newTodo);
@@ -51,18 +54,15 @@ class TodoProvider with ChangeNotifier {
   }
 
   // Update a todo
-  Future<void> updateTodo(int id, {String? title, String? description, bool? completed}) async {
+  Future<void> updateTodo(int id,
+      {String? title, String? description, bool? completed}) async {
     _setLoading(true);
     _clearError();
-    
+
     try {
-      final updatedTodo = await _apiService.updateTodo(
-        id, 
-        title: title, 
-        description: description, 
-        completed: completed
-      );
-      
+      final updatedTodo = await _apiService.updateTodo(id,
+          title: title, description: description, completed: completed);
+
       final index = _todos.indexWhere((todo) => todo.id == id);
       if (index != -1) {
         _todos[index] = updatedTodo;
@@ -79,7 +79,7 @@ class TodoProvider with ChangeNotifier {
   Future<void> deleteTodo(int id) async {
     _setLoading(true);
     _clearError();
-    
+
     try {
       await _apiService.deleteTodo(id);
       _todos.removeWhere((todo) => todo.id == id);
@@ -95,7 +95,7 @@ class TodoProvider with ChangeNotifier {
   Future<void> toggleTodo(int id) async {
     _setLoading(true);
     _clearError();
-    
+
     try {
       final updatedTodo = await _apiService.toggleTodo(id);
       final index = _todos.indexWhere((todo) => todo.id == id);
@@ -136,4 +136,4 @@ class TodoProvider with ChangeNotifier {
     _todos.clear();
     notifyListeners();
   }
-} 
+}

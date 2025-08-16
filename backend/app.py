@@ -4,13 +4,18 @@ from flask_sqlalchemy import SQLAlchemy
 from datetime import datetime
 import os
 
+
 app = Flask(__name__)
 CORS(app)
 
 # Database configuration - using your RDS endpoint
 app.config['SQLALCHEMY_DATABASE_URI'] = os.getenv(
     'DATABASE_URL',
-    'mysql+pymysql://shreyash:shreyash123@todo-db.cro088wagfps.ap-south-1.rds.amazonaws.com:3306/todo_db'
+    'mysql+pymysql://{user}:{password}@{host}:3306/todo_db'.format(
+        user=os.getenv('DB_USER', 'appuser'),
+        password=os.getenv('DB_PASSWORD', 'ChangeMe!123'),
+        host=os.getenv('DB_HOST', 'localhost')
+    )
 )
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 
