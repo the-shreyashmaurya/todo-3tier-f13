@@ -225,10 +225,55 @@ resource "aws_security_group" "rds_dr" {
   tags = local.tags
 }
 
+# DR Security Groups
+resource "aws_security_group" "alb_dr" {
+  provider = aws.dr
+  name     = "${local.name}-alb-dr-sg"
+  vpc_id   = data.aws_vpc.dr.id
+  ingress {
+    from_port   = 80
+    to_port     = 80
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+  tags = local.tags
+}
+resource "aws_security_group" "ec2_dr" {
+  provider = aws.dr
+  name     = "${local.name}-ec2-dr-sg"
+  vpc_id   = data.aws_vpc.dr.id
+  ingress {
+    description     = "from ALB"
+    from_port       = 5000
+    to_port         = 5000
+    protocol        = "tcp"
+    security_groups = [aws_security_group.alb_dr.id]
+  }
+  ingress {
+    from_port   = 22
+    to_port     = 22
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+  tags = local.tags
+}
+
 ########################################
 # AMI (Amazon Linux 2)
 ########################################
-data "aws_ami" "amzn2" {
+data "aws_ami" "amzn2_primary" {
   provider    = aws.primary
   owners      = ["amazon"]
   most_recent = true
@@ -237,6 +282,17 @@ data "aws_ami" "amzn2" {
     values = ["amzn2-ami-hvm-*-x86_64-gp2"]
   }
 }
+
+data "aws_ami" "amzn2_dr" {
+  provider    = aws.dr
+  owners      = ["amazon"]
+  most_recent = true
+  filter {
+    name   = "name"
+    values = ["amzn2-ami-hvm-*-x86_64-gp2"]
+  }
+}
+
 
 ########################################
 # IAM for EC2: read SSM params
@@ -279,25 +335,33 @@ resource "aws_iam_instance_profile" "ec2_profile" {
 }
 
 ########################################
-# EC2 (single instance in primary)
+# EC2 Instances (primary & DR)
 ########################################
 locals {
   user_data = <<-EOT
     #!/bin/bash
     set -xe
+
+    # Update system and install dependencies
     yum update -y
     yum install -y git python3 python3-pip python3-virtualenv jq awscli
 
-    # App code
+    # Clone your app
     cd /opt
     git clone https://github.com/the-shreyashmaurya/todo-3tier-f13.git || true
     cd /opt/todo-3tier-f13/backend
 
+    # Create and activate virtualenv
     python3 -m venv /opt/todo-venv
-    /opt/todo-venv/bin/pip install --upgrade pip
-    [ -f requirements.txt ] && /opt/todo-venv/bin/pip install -r requirements.txt || /opt/todo-venv/bin/pip install flask flask_sqlalchemy flask_cors pymysql gunicorn
 
-    # SSM refresh helper -> /etc/todo.env (DATABASE_URL), restart on change
+    # Install requirements
+    if [ -f requirements.txt ]; then
+      /opt/todo-venv/bin/pip install -r requirements.txt
+    else
+      /opt/todo-venv/bin/pip install flask flask_sqlalchemy flask_cors pymysql gunicorn
+    fi
+
+    # Create SSM refresh helper
     cat > /usr/local/bin/refresh_db_env.sh <<'EOF'
     #!/bin/bash
     PARAM_NAME="${local.ssm_db_url}"
@@ -315,7 +379,7 @@ locals {
     chmod +x /usr/local/bin/refresh_db_env.sh
     /usr/local/bin/refresh_db_env.sh || true
 
-    # systemd unit
+    # Create systemd service
     cat > /etc/systemd/system/todo-backend.service <<'EOF'
     [Unit]
     Description=Todo Backend Flask App
@@ -334,18 +398,19 @@ locals {
     WantedBy=multi-user.target
     EOF
 
+    # Reload systemd and start service
     systemctl daemon-reload
     systemctl enable todo-backend
-    systemctl start todo-backend || true
+    systemctl start todo-backend
 
-    # Poll SSM every minute
+    # Add cron job to refresh SSM every minute
     (crontab -l 2>/dev/null; echo "* * * * * /usr/local/bin/refresh_db_env.sh >/tmp/refresh_db_env.log 2>&1") | crontab -
   EOT
 }
 
 resource "aws_instance" "app" {
   provider                    = aws.primary
-  ami                         = data.aws_ami.amzn2.id
+  ami                         = data.aws_ami.amzn2_primary.id
   instance_type               = var.instance_type
   subnet_id                   = local.primary_subnets[0]
   vpc_security_group_ids      = [aws_security_group.ec2.id]
@@ -353,6 +418,21 @@ resource "aws_instance" "app" {
   associate_public_ip_address = true
   user_data_base64            = base64encode(local.user_data)
   tags                        = merge(local.tags, { Name = "${local.name}-app-ec2" })
+}
+
+resource "aws_instance" "app_dr" {
+  provider                    = aws.dr
+  ami                         = data.aws_ami.amzn2_dr.id
+  instance_type               = var.instance_type
+  subnet_id                   = local.dr_subnets[0]
+  vpc_security_group_ids      = [aws_security_group.ec2_dr.id]
+  iam_instance_profile        = aws_iam_instance_profile.ec2_profile.name
+  associate_public_ip_address = true
+  user_data_base64            = base64encode(local.user_data)
+  # Do not start the instance automatically. It will be started by the Lambda watchdog.
+  # This saves cost by not running the instance in DR unless needed.
+  instance_initiated_shutdown_behavior = "stop"
+  tags                        = merge(local.tags, { Name = "${local.name}-app-ec2-dr" })
 }
 
 ########################################
@@ -399,6 +479,51 @@ resource "aws_lb_listener" "http" {
   default_action {
     type               = "forward"
     target_group_arn   = aws_lb_target_group.app.arn
+  }
+}
+
+# DR ALB (initially stopped)
+resource "aws_lb" "app_dr" {
+  provider           = aws.dr
+  name               = "${local.name}-dr-alb"
+  load_balancer_type = "application"
+  subnets            = local.dr_subnets
+  security_groups    = [aws_security_group.alb_dr.id]
+  tags               = local.tags
+}
+
+resource "aws_lb_target_group" "app_dr" {
+  provider = aws.dr
+  name     = "${local.name}-dr-tg"
+  port     = 5000
+  protocol = "HTTP"
+  vpc_id   = data.aws_vpc.dr.id
+  health_check {
+    path                = "/api/health"
+    matcher             = "200"
+    interval            = 15
+    healthy_threshold   = 2
+    unhealthy_threshold = 3
+    timeout             = 5
+  }
+  tags = local.tags
+}
+
+resource "aws_lb_target_group_attachment" "app_dr" {
+  provider         = aws.dr
+  target_group_arn = aws_lb_target_group.app_dr.arn
+  target_id        = aws_instance.app_dr.id
+  port             = 5000
+}
+
+resource "aws_lb_listener" "http_dr" {
+  provider          = aws.dr
+  load_balancer_arn = aws_lb.app_dr.arn
+  port              = 80
+  protocol          = "HTTP"
+  default_action {
+    type               = "forward"
+    target_group_arn   = aws_lb_target_group.app_dr.arn
   }
 }
 
@@ -499,6 +624,17 @@ resource "aws_iam_policy" "lambda_policy" {
     Version="2012-10-17",
     Statement=[
       { Effect="Allow", Action=["rds:DescribeDBInstances","rds:PromoteReadReplica"], Resource="*" },
+      { Effect="Allow", Action=["ec2:StartInstances"], Resource=[
+          aws_instance.app_dr.arn
+      ]},
+      { Effect="Allow", Action=["ec2:DescribeInstances"], Resource="*" },
+      { Effect="Allow", Action=["elasticloadbalancing:DescribeLoadBalancers"], Resource="*" },
+      { Effect="Allow", Action=["elasticloadbalancing:StartLoadBalancer"], Resource=[
+          aws_lb.app_dr.arn
+      ]},
+      { Effect="Allow", Action=["cloudfront:UpdateDistribution"], Resource=[
+          aws_cloudfront_distribution.cf.arn
+      ]},
       { Effect="Allow", Action=["ssm:GetParameter","ssm:PutParameter"], Resource=[
           "arn:aws:ssm:${var.primary_region}:${data.aws_caller_identity.primary.account_id}:parameter${local.ssm_db_url}",
           "arn:aws:ssm:${var.primary_region}:${data.aws_caller_identity.primary.account_id}:parameter${local.ssm_db_username}",
@@ -521,12 +657,15 @@ data "archive_file" "lambda_zip" {
   source {
     filename = "lambda_main.py"
     content  = <<-PY
-      import os, json, boto3, botocore
-
+      import os, json, boto3, botocore, time
+      
       PRIMARY_REGION  = os.environ["PRIMARY_REGION"]
       DR_REGION       = os.environ["DR_REGION"]
       PRIMARY_DB_ID   = os.environ["PRIMARY_DB_ID"]
       DR_DB_ID        = os.environ["DR_DB_ID"]
+      DR_EC2_ID       = os.environ["DR_EC2_ID"]
+      DR_ALB_ARN      = os.environ["DR_ALB_ARN"]
+      CF_DISTRO_ID    = os.environ["CF_DISTRO_ID"]
       SSM_DB_URL      = os.environ["SSM_DB_URL"]
       SSM_USER        = os.environ["SSM_USER"]
       SSM_PASS        = os.environ["SSM_PASS"]
@@ -536,7 +675,10 @@ data "archive_file" "lambda_zip" {
 
       rds_primary = boto3.client("rds", region_name=PRIMARY_REGION)
       rds_dr      = boto3.client("rds", region_name=DR_REGION)
+      ec2_dr      = boto3.client("ec2", region_name=DR_REGION)
+      elb_dr      = boto3.client("elb", region_name=DR_REGION)
       ssm         = boto3.client("ssm", region_name=PRIMARY_REGION)
+      cf          = boto3.client("cloudfront", region_name="us-east-1") # CloudFront is global
 
       def get_param(name, decrypt=True, default=None):
           try:
@@ -576,6 +718,30 @@ data "archive_file" "lambda_zip" {
           resp = rds_dr.describe_db_instances(DBInstanceIdentifier=DR_DB_ID)
           ep  = resp["DBInstances"][0]["Endpoint"]
           return ep["Address"], ep["Port"]
+      
+      def start_dr_services():
+          # Start EC2 instance
+          ec2_dr.start_instances(InstanceIds=[DR_EC2_ID])
+          waiter = ec2_dr.get_waiter("instance_running")
+          waiter.wait(InstanceIds=[DR_EC2_ID])
+          # Start ALB (it's always "on" but we need to wait for it to be ready)
+          # No specific start/stop for ALB, we just wait for it to be available.
+          waiter = elb_dr.get_waiter("load_balancer_exists")
+          waiter.wait(LoadBalancerArns=[DR_ALB_ARN])
+
+      def update_cloudfront_to_dr():
+          resp = cf.get_distribution_config(Id=CF_DISTRO_ID)
+          config = resp["DistributionConfig"]
+          etag = resp["ETag"]
+          
+          # Change the default origin to the DR ALB origin
+          config["DefaultCacheBehavior"]["TargetOriginId"] = "dr-alb-origin"
+          
+          cf.update_distribution(
+              DistributionConfig=config,
+              Id=CF_DISTRO_ID,
+              IfMatch=etag
+          )
 
       def lambda_handler(event, context):
           if primary_healthy():
@@ -588,6 +754,8 @@ data "archive_file" "lambda_zip" {
 
           try:
               promote_dr()
+              start_dr_services()
+              update_cloudfront_to_dr()
               reset_fail()
           except Exception as e:
               return {"statusCode":500, "body":json.dumps({"ok":False,"error":str(e)})}
@@ -620,6 +788,9 @@ resource "aws_lambda_function" "dr_watch" {
       DR_REGION                  = var.dr_region
       PRIMARY_DB_ID              = aws_db_instance.primary.id
       DR_DB_ID                   = aws_db_instance.dr_replica.id
+      DR_EC2_ID                  = aws_instance.app_dr.id
+      DR_ALB_ARN                 = aws_lb.app_dr.arn
+      CF_DISTRO_ID               = aws_cloudfront_distribution.cf.id
       SSM_DB_URL                 = local.ssm_db_url
       SSM_USER                   = local.ssm_db_username
       SSM_PASS                   = local.ssm_db_password
@@ -628,7 +799,7 @@ resource "aws_lambda_function" "dr_watch" {
       MIN_CONSECUTIVE_FAILURES   = tostring(var.min_consecutive_failures)
     }
   }
-  depends_on = [aws_db_instance.primary, aws_db_instance.dr_replica, aws_iam_role_policy_attachment.lambda_attach]
+  depends_on = [aws_db_instance.primary, aws_db_instance.dr_replica, aws_iam_role_policy_attachment.lambda_attach, aws_instance.app_dr, aws_lb.app_dr]
   tags       = local.tags
 }
 
@@ -673,6 +844,28 @@ resource "aws_s3_bucket_public_access_block" "static" {
   restrict_public_buckets = true
 }
 
+resource "aws_s3_bucket" "static_dr" {
+  provider      = aws.dr
+  bucket        = "${local.name}-dr-static-${random_string.rand.result}"
+  force_destroy = true
+  tags          = local.tags
+}
+
+resource "aws_s3_bucket_versioning" "static_dr" {
+  provider = aws.dr
+  bucket   = aws_s3_bucket.static_dr.id
+  versioning_configuration { status = "Enabled" }
+}
+
+resource "aws_s3_bucket_public_access_block" "static_dr" {
+  provider                = aws.dr
+  bucket                  = aws_s3_bucket.static_dr.id
+  block_public_acls       = true
+  block_public_policy     = true
+  ignore_public_acls      = true
+  restrict_public_buckets = true
+}
+
 resource "random_string" "rand" {
   length  = 6
   upper   = false
@@ -686,13 +879,48 @@ resource "aws_cloudfront_origin_access_control" "oac" {
   signing_behavior                  = "always"
   signing_protocol                  = "sigv4"
 }
+resource "aws_cloudfront_origin_access_control" "oac_dr" {
+  provider = aws.dr
+  name                              = "${local.name}-oac-dr"
+  origin_access_control_origin_type = "s3"
+  signing_behavior                  = "always"
+  signing_protocol                  = "sigv4"
+}
+# Upload index.html to DR S3 bucket
+resource "aws_s3_object" "dr_index_html" {
+  provider = aws.dr
+  bucket   = aws_s3_bucket.static_dr.id
+  key      = "index.html"
+  content_type = "text/html"
+  content = <<-HTML
+    <!DOCTYPE html>
+    <html lang="en">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>DR Region Active</title>
+        <style>
+            body { font-family: sans-serif; text-align: center; padding-top: 100px; }
+            h1 { color: #d9534f; }
+            p { font-size: 1.2em; }
+        </style>
+    </head>
+    <body>
+        <h1>Disaster Recovery Region is now Active.</h1>
+        <p>The primary region is currently unavailable. We are serving content from our disaster recovery site.</p>
+        <p>Your data is safe and the application will be back to normal shortly.</p>
+    </body>
+    </html>
+  HTML
+  acl = "public-read" # ACL is required for website hosting, OAC is for CF origin access
+}
 
 ########################################
-# CloudFront: Origin Group (ALB primary -> S3 failover)
+# CloudFront: Origin Group (ALB primary -> ALB DR -> S3 failover)
 ########################################
 resource "aws_cloudfront_distribution" "cf" {
   enabled             = true
-  comment             = "${local.name} - CF failover ALB->S3"
+  comment             = "${local.name} - CF failover ALB->ALB DR"
   default_root_object = "index.html"
 
   # Origin Group for failover
@@ -700,7 +928,7 @@ resource "aws_cloudfront_distribution" "cf" {
     origin_id = "og-app"
     failover_criteria { status_codes = [500, 502, 503, 504] }
     member { origin_id = "alb-primary" }
-    member { origin_id = "s3-static" }
+    member { origin_id = "alb-dr" } # New DR origin
   }
 
   # Primary origin: ALB
@@ -721,7 +949,18 @@ resource "aws_cloudfront_distribution" "cf" {
     origin_id                = "s3-static"
     origin_access_control_id = aws_cloudfront_origin_access_control.oac.id
   }
-
+  
+  # DR Origin: DR ALB
+  origin {
+    domain_name = aws_lb.app_dr.dns_name
+    origin_id   = "alb-dr"
+    custom_origin_config {
+      http_port              = 80
+      https_port             = 443
+      origin_protocol_policy = "http-only"
+      origin_ssl_protocols   = ["TLSv1.2"]
+    }
+  }
   # Default behavior: route to origin group (dynamic/no cache)
   default_cache_behavior {
     target_origin_id       = "og-app"
@@ -749,7 +988,6 @@ resource "aws_cloudfront_distribution" "cf" {
   }
   tags = local.tags
 }
-
 # Allow CloudFront to read from S3 via OAC (bucket policy ties to CF distribution ARN)
 resource "aws_s3_bucket_policy" "static" {
   provider = aws.primary

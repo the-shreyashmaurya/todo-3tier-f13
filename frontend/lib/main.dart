@@ -17,13 +17,11 @@ class TodoApp extends StatelessWidget {
       providers: [
         ChangeNotifierProvider(
             create: (_) => TodoProvider(
-                apiService: ApiService(
-                    baseUrl:
-                        'http://todo3tier-default-alb-1320225941.ap-south-1.elb.amazonaws.com/api'))),
+                apiService:
+                    ApiService(baseUrl: 'http://52.66.204.17:5000/api'))),
         Provider<ApiService>(
           create: (_) => ApiService(
-            baseUrl:
-                'http://todo3tier-default-alb-1320225941.ap-south-1.elb.amazonaws.com/api',
+            baseUrl: 'http://52.66.204.17:5000/api',
           ),
         ),
       ],
